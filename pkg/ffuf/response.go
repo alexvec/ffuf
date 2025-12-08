@@ -1,7 +1,7 @@
 package ffuf
 
 import (
-	"net/http"
+	http "github.com/bogdanfinn/fhttp"
 	"net/url"
 	"time"
 )

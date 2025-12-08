@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
-	"crypto/tls"
 	"fmt"
+	http "github.com/bogdanfinn/fhttp"
+	tls_client "github.com/bogdanfinn/tls-client"
+	"github.com/bogdanfinn/tls-client/profiles"
+
 	"io"
-	"net"
-	"net/http"
 	"net/http/httptrace"
-	"net/http/httputil"
 	"net/textproto"
 	"net/url"
 	"strconv"
@@ -27,12 +27,11 @@ const MAX_DOWNLOAD_SIZE = 5242880
 
 type SimpleRunner struct {
 	config *ffuf.Config
-	client *http.Client
+	client *tls_client.HttpClient
 }
 
-func NewSimpleRunner(conf *ffuf.Config, replay bool) ffuf.RunnerProvider {
+func NewSimpleRunner(conf *ffuf.Config, replay bool) (ffuf.RunnerProvider, error) {
 	var simplerunner SimpleRunner
-	proxyURL := http.ProxyFromEnvironment
 	customProxy := ""
 
 	if replay {
@@ -41,45 +40,80 @@ func NewSimpleRunner(conf *ffuf.Config, replay bool) ffuf.RunnerProvider {
 		customProxy = conf.ProxyURL
 	}
 	if len(customProxy) > 0 {
-		pu, err := url.Parse(customProxy)
-		if err == nil {
-			proxyURL = http.ProxyURL(pu)
+		_, err := url.Parse(customProxy)
+		if err != nil {
+			customProxy = ""
 		}
 	}
-	cert := []tls.Certificate{}
 
-	if conf.ClientCert != "" && conf.ClientKey != "" {
-		tmp, _ := tls.LoadX509KeyPair(conf.ClientCert, conf.ClientKey)
-		cert = []tls.Certificate{tmp}
-	}
+	// TODO: Add custom TLS Certificate support
+	/*
+		cert := []tls.Certificate{}
+
+		if conf.ClientCert != "" && conf.ClientKey != "" {
+			tmp, _ := tls.LoadX509KeyPair(conf.ClientCert, conf.ClientKey)
+			cert = []tls.Certificate{tmp}
+		}
+	*/
 
 	simplerunner.config = conf
-	simplerunner.client = &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
-		Timeout:       time.Duration(time.Duration(conf.Timeout) * time.Second),
-		Transport: &http.Transport{
-			ForceAttemptHTTP2:   conf.Http2,
-			Proxy:               proxyURL,
-			MaxIdleConns:        1000,
-			MaxIdleConnsPerHost: 500,
-			MaxConnsPerHost:     500,
-			DialContext: (&net.Dialer{
-				Timeout: time.Duration(time.Duration(conf.Timeout) * time.Second),
-			}).DialContext,
-			TLSHandshakeTimeout: time.Duration(time.Duration(conf.Timeout) * time.Second),
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-				MinVersion:         tls.VersionTLS10,
-				Renegotiation:      tls.RenegotiateOnceAsClient,
-				ServerName:         conf.SNI,
-				Certificates:       cert,
-			},
-		}}
+	options := []tls_client.HttpClientOption{
+		tls_client.WithCustomRedirectFunc(func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }),
+		tls_client.WithTimeoutSeconds(conf.Timeout),
+		tls_client.WithTransportOptions(&tls_client.TransportOptions{
+			KeyLogWriter:           nil,
+			IdleConnTimeout:        nil,
+			RootCAs:                nil,
+			MaxIdleConns:           1000,
+			MaxIdleConnsPerHost:    500,
+			MaxConnsPerHost:        500,
+			MaxResponseHeaderBytes: 0,
+			WriteBufferSize:        0,
+			ReadBufferSize:         0,
+			DisableKeepAlives:      false,
+			DisableCompression:     false,
+		}),
+		tls_client.WithProxyUrl(customProxy),
+		tls_client.WithInsecureSkipVerify(),
+		tls_client.WithClientProfile(profiles.Chrome_133),
+		tls_client.WithRandomTLSExtensionOrder(),
+	}
 
 	if conf.FollowRedirects {
-		simplerunner.client.CheckRedirect = nil
+		options = append(options, tls_client.WithNotFollowRedirects())
 	}
-	return &simplerunner
+
+	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
+	if err != nil {
+		return nil, err
+	}
+
+	simplerunner.client = &client
+
+	/*
+		simplerunner.client = &http.Client{
+			CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
+			Timeout:       time.Duration(time.Duration(conf.Timeout) * time.Second),
+			Transport: &http.Transport{
+				ForceAttemptHTTP2:   conf.Http2,
+				Proxy:               proxyURL,
+				MaxIdleConns:        1000,
+				MaxIdleConnsPerHost: 500,
+				MaxConnsPerHost:     500,
+				DialContext: (&net.Dialer{
+					Timeout: time.Duration(time.Duration(conf.Timeout) * time.Second),
+				}).DialContext,
+				TLSHandshakeTimeout: time.Duration(time.Duration(conf.Timeout) * time.Second),
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+					MinVersion:         tls.VersionTLS10,
+					Renegotiation:      tls.RenegotiateOnceAsClient,
+					ServerName:         conf.SNI,
+					Certificates:       cert,
+				},
+			}}
+	*/
+	return &simplerunner, nil
 }
 
 func (r *SimpleRunner) Prepare(input map[string][]byte, basereq *ffuf.Request) (ffuf.Request, error) {
@@ -147,11 +181,13 @@ func (r *SimpleRunner) Execute(req *ffuf.Request) (ffuf.Response, error) {
 	}
 
 	if len(r.config.OutputDirectory) > 0 || len(r.config.AuditLog) > 0 {
-		rawreq, _ = httputil.DumpRequestOut(httpreq, true)
+		// TODO: Add support for httputil
+		// rawreq, _ = httputil.DumpRequestOut(httpreq, true)
 		req.Raw = string(rawreq)
 	}
 
-	httpresp, err := r.client.Do(httpreq)
+	client := *r.client
+	httpresp, err := client.Do(httpreq)
 	if err != nil {
 		return ffuf.Response{}, err
 	}
@@ -172,9 +208,10 @@ func (r *SimpleRunner) Execute(req *ffuf.Request) (ffuf.Response, error) {
 	}
 
 	if len(r.config.OutputDirectory) > 0 || len(r.config.AuditLog) > 0 {
-		rawresp, _ := httputil.DumpResponse(httpresp, true)
+		// TODO: Add support for httputil
+		// rawresp, _ := httputil.DumpResponse(httpresp, true)
 		resp.Request.Raw = string(rawreq)
-		resp.Raw = string(rawresp)
+		// resp.Raw = string(rawresp)
 	}
 	var bodyReader io.ReadCloser
 	if httpresp.Header.Get("Content-Encoding") == "gzip" {
@@ -237,5 +274,7 @@ func (r *SimpleRunner) Dump(req *ffuf.Request) ([]byte, error) {
 	for k, v := range req.Headers {
 		httpreq.Header.Set(k, v)
 	}
-	return httputil.DumpRequestOut(httpreq, true)
+	return nil, nil
+	// TODO: Add httputil support
+	// return httputil.DumpRequestOut(httpreq, true)
 }

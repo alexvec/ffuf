@@ -279,9 +279,15 @@ func prepareJob(conf *ffuf.Config) (*ffuf.Job, error) {
 	job.Input, errs = input.NewInputProvider(conf)
 	// TODO: implement error handling for runnerprovider and outputprovider
 	// We only have http runner right now
-	job.Runner = runner.NewRunnerByName("http", conf, false)
+	job.Runner, err = runner.NewRunnerByName("http", conf, false)
+	if err != nil {
+		errs.Add(err)
+	}
 	if len(conf.ReplayProxyURL) > 0 {
-		job.ReplayRunner = runner.NewRunnerByName("http", conf, true)
+		job.ReplayRunner, err = runner.NewRunnerByName("http", conf, true)
+		if err != nil {
+			errs.Add(err)
+		}
 	}
 	// We only have stdout outputprovider right now
 	job.Output = output.NewOutputProviderByName("stdout", conf)
@@ -427,7 +433,13 @@ func printSearchResults(conf *ffuf.Config, pos int, exectime time.Time, hash str
 	inputdata := inp.Value()
 	inputdata["FFUFHASH"] = []byte(hash)
 	basereq := ffuf.BaseRequest(conf)
-	dummyrunner := runner.NewRunnerByName("simple", conf, false)
+	dummyrunner, errSingle := runner.NewRunnerByName("simple", conf, false)
+	if errSingle != nil {
+		fmt.Printf("-------------------------------------------\n")
+		fmt.Println("Encountered error that prevents reproduction of the request:")
+		fmt.Println(errSingle)
+		return
+	}
 	ffufreq, _ := dummyrunner.Prepare(inputdata, &basereq)
 	rawreq, _ := dummyrunner.Dump(&ffufreq)
 	fmt.Printf("-------------------------------------------\n")
